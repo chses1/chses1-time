@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>中山國小學期評量看板系統</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <style>
+        /* 隱藏數字輸入框的箭頭 */
+        input[type=number]::-webkit-inner-spin-button, 
+        input[type=number]::-webkit-outer-spin-button { 
+            -webkit-appearance: none; 
+            margin: 0; 
+        }
+        
+        /* 自定義字體與全螢幕佈局 */
+        body {
+            font-family: "Microsoft JhengHei", "Heiti TC", sans-serif;
+            overflow: hidden; /* 防止滾動 */
+            background-color: #f3f4f6;
+        }
+
+        .text-shadow {
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        /* 隱藏檔案輸入原始按鈕 */
+        .hidden-input {
+            display: none;
+        }
+
+        /* 讓按鈕在被點擊時有明顯回饋 */
+        .btn-active:active {
+            transform: scale(0.95);
+        }
+
+        /* 跑道進度條動畫 */
+        .track-transition {
+            transition: stroke-dashoffset 1s linear, stroke 0.5s ease;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+
+        // --- 設定資料 ---
+        // 完整的時間表
+        const SCHEDULE = [
+            { type: 'break', start: '08:40', end: '08:45', label: '準備' },
+            { type: 'exam',  start: '08:45', end: '09:25', label: '第一節' },
+            { type: 'break', start: '09:25', end: '09:35', label: '下課' },
+            { type: 'exam',  start: '09:35', end: '10:15', label: '第二節' },
+            { type: 'break', start: '10:15', end: '10:25', label: '下課' },
+            { type: 'exam',  start: '10:25', end: '11:05', label: '第三節' },
+            { type: 'break', start: '11:05', end: '11:15', label: '收卷' }
+        ];
+
+        // 僅提取考試時段供 A 區顯示使用
+        const EXAM_SLOTS = SCHEDULE.filter(s => s.type === 'exam');
+
+        const EXAM_MESSAGES = [
+            "考卷記得寫上班級姓名座號",
+            "有問題舉手問老師，需要撿東西請監考老師幫忙",
+            "不會寫的題目跳過寫會的題目",
+            "耐心、細心、小心",
+            "考卷有不會的問題等出題老師來了再問",
+            "不要轉頭玩東西，寫完多檢查",
+            "檢查完再檢查或趴下休息",
+            "考試即將結束，檢查有沒有寫答案抄錯"
+        ];
+
+        const BREAK_MESSAGES = [
+            "等監考老師點完再離開座位下課",
+            "利用下課準備下個科目與文具用品",
+            "提早上廁所喝水",
+            "桌面淨空",
+            "準備考試、收拾位置、坐在位置上"
+        ];
+
+        // 格式化時間 HH:MM:SS
+        const formatTime = (date) => {
+            const h = String(date.getHours()).padStart(2, '0');
+            const m = String(date.getMinutes()).padStart(2, '0');
+            const s = String(date.getSeconds()).padStart(2, '0');
+            return `${h}:${m}:${s}`;
+        };
+
+        const App = () => {
+            // --- 狀態管理 ---
+            // 系統時間與偏移量
+            const [now, setNow] = useState(new Date());
+            const [offset, setOffset] = useState(() => {
+                const saved = localStorage.getItem('exam_clock_offset');
+                return saved ? parseInt(saved, 10) : 0;
+            });
+
+            // 音檔相關狀態 (陣列，對應 3 個時段)
+            const [audioTracks, setAudioTracks] = useState([
+                { src: null, fileName: "", isPlaying: false, progress: 0 },
+                { src: null, fileName: "", isPlaying: false, progress: 0 },
+                { src: null, fileName: "", isPlaying: false, progress: 0 }
+            ]);
+            
+            // Refs 陣列
+            const audioRefs = useRef([]);
+            const fileInputRefs = useRef([]);
+
+            // A區資料：科目(陣列)、應到、實到、未到
+            const [examData, setExamData] = useState(() => {
+                const saved = localStorage.getItem('exam_data');
+                if (saved) {
+                    const parsed = JSON.parse(saved);
+                    if (typeof parsed.subject === 'string') {
+                        return { ...parsed, subjects: [parsed.subject, "", ""], subject: undefined };
+                    }
+                    if (!parsed.subjects) {
+                        return { ...parsed, subjects: ["", "", ""] };
+                    }
+                    return parsed;
+                }
+                return {
+                    subjects: ["國語", "自然", "英文"],
+                    shouldArrive: "",
+                    actualArrive: "",
+                    absentList: ""
+                };
+            });
+
+            // --- Effect: 時鐘滴答 ---
+            useEffect(() => {
+                const timer = setInterval(() => {
+                    setNow(new Date());
+                }, 1000);
+                return () => clearInterval(timer);
+            }, []);
+
+            // --- Effect: 儲存資料 ---
+            useEffect(() => {
+                localStorage.setItem('exam_clock_offset', offset);
+            }, [offset]);
+
+            useEffect(() => {
+                localStorage.setItem('exam_data', JSON.stringify(examData));
+            }, [examData]);
+
+            // --- 計算邏輯 ---
+            // 計算「修正後」的當前時間
+            const adjustedNow = useMemo(() => {
+                return new Date(now.getTime() + offset);
+            }, [now, offset]);
+
+            // 判斷當前的時段
+            const currentSlot = useMemo(() => {
+                const currentMs = adjustedNow.getHours() * 3600000 + adjustedNow.getMinutes() * 60000 + adjustedNow.getSeconds() * 1000;
+                
+                for (let slot of SCHEDULE) {
+                    const [sh, sm] = slot.start.split(':').map(Number);
+                    const startMs = sh * 3600000 + sm * 60000;
+                    
+                    const [eh, em] = slot.end.split(':').map(Number);
+                    const endMs = eh * 3600000 + em * 60000;
+
+                    if (currentMs >= startMs && currentMs < endMs) {
+                        return { ...slot, startMs, endMs, durationMs: endMs - startMs };
+                    }
+                }
+                return null;
+            }, [adjustedNow]);
+
+
+            // --- B區 輪播邏輯 ---
+            const reminderMessage = useMemo(() => {
+                if (!currentSlot) return "非考試/準備時段";
+
+                const currentMs = adjustedNow.getHours() * 3600000 + adjustedNow.getMinutes() * 60000 + adjustedNow.getSeconds() * 1000;
+                const elapsedMinutes = Math.floor((currentMs - currentSlot.startMs) / 60000);
+
+                let messages = [];
+                let interval = 5;
+
+                if (currentSlot.type === 'exam') {
+                    messages = EXAM_MESSAGES;
+                    interval = 5;
+                } else {
+                    messages = BREAK_MESSAGES;
+                    const durationMins = currentSlot.durationMs / 60000;
+                    if (durationMins >= 20) {
+                        interval = 4;
+                    } else {
+                        interval = 2;
+                    }
+                }
+                const index = Math.floor(elapsedMinutes / interval) % messages.length;
+                return messages[index];
+            }, [adjustedNow, currentSlot]);
+
+
+            // --- C區 進度條顏色與文字邏輯 ---
+            const progressInfo = useMemo(() => {
+                // 如果現在不在任何表定時間內
+                if (!currentSlot) {
+                    return { remainingPercent: 0, color: 'stroke-gray-300', text: '等待中' };
+                }
+
+                const currentMs = adjustedNow.getHours() * 3600000 + adjustedNow.getMinutes() * 60000 + adjustedNow.getSeconds() * 1000;
+                const progressMs = currentMs - currentSlot.startMs;
+                const totalMs = currentSlot.durationMs;
+                const remainingMs = totalMs - progressMs;
+                
+                // 計算「剩餘」百分比 (100 -> 0)
+                const elapsedPercent = Math.min(100, Math.max(0, (progressMs / totalMs) * 100));
+                const remainingPercent = 100 - elapsedPercent;
+
+                let colorClass = 'stroke-green-500';
+                let statusText = "";
+
+                if (currentSlot.type === 'exam') {
+                    // 考試邏輯 (維持不變)
+                    statusText = "考試開始";
+                    if (remainingMs <= totalMs / 2) {
+                        colorClass = 'stroke-yellow-400';
+                        statusText = "考試時間剩下一半";
+                    }
+                    if (remainingMs <= 10 * 60000) {
+                        colorClass = 'stroke-red-500';
+                        statusText = "考試時間不到10分鐘";
+                    }
+                } else {
+                    // 下課/休息邏輯 (新需求)
+                    // > 5分鐘: 綠色
+                    // 5~3分鐘: 黃色
+                    // < 3分鐘: 紅色
+                    
+                    if (remainingMs > 5 * 60000) {
+                        colorClass = 'stroke-green-500';
+                        statusText = "休息時間";
+                    } else if (remainingMs > 3 * 60000) {
+                        colorClass = 'stroke-yellow-400';
+                        statusText = "快去上廁所喝水";
+                    } else {
+                        colorClass = 'stroke-red-500';
+                        statusText = "請收拾東西在座位上坐好";
+                    }
+                }
+
+                return { remainingPercent, color: colorClass, text: statusText };
+            }, [adjustedNow, currentSlot]);
+
+
+            // --- UI 處理函式 ---
+            const handleInputChange = (field, value) => {
+                setExamData(prev => ({ ...prev, [field]: value }));
+            };
+
+            const handleSubjectChange = (index, value) => {
+                const newSubjects = [...examData.subjects];
+                newSubjects[index] = value;
+                setExamData(prev => ({ ...prev, subjects: newSubjects }));
+            };
+
+            const adjustTime = (seconds) => {
+                setOffset(prev => prev + (seconds * 1000));
+            };
+
+            // 音檔處理
+            const handleFileSelect = (index, e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const url = URL.createObjectURL(file);
+                    setAudioTracks(prev => {
+                        const newTracks = [...prev];
+                        if (newTracks[index].src) URL.revokeObjectURL(newTracks[index].src);
+                        newTracks[index] = { src: url, fileName: file.name, isPlaying: false, progress: 0 };
+                        return newTracks;
+                    });
+                }
+            };
+
+            const togglePlay = (index) => {
+                const audioEl = audioRefs.current[index];
+                if (!audioEl) return;
+                
+                setAudioTracks(prev => {
+                    const newTracks = [...prev];
+                    const isNowPlaying = !newTracks[index].isPlaying;
+                    
+                    if (isNowPlaying) {
+                        // 暫停其他所有音檔
+                        newTracks.forEach((track, i) => {
+                            if (i !== index && track.isPlaying) {
+                                if (audioRefs.current[i]) audioRefs.current[i].pause();
+                                track.isPlaying = false;
+                            }
+                        });
+                        audioEl.play().catch(() => {});
+                    } else {
+                        audioEl.pause();
+                    }
+                    
+                    newTracks[index].isPlaying = isNowPlaying;
+                    return newTracks;
+                });
+            };
+
+            // 新增：重播功能
+            const replayAudio = (index) => {
+                const audioEl = audioRefs.current[index];
+                if (!audioEl) return;
+
+                // 重置時間並播放
+                audioEl.currentTime = 0;
+                audioEl.play().catch(() => {});
+
+                setAudioTracks(prev => {
+                    const newTracks = [...prev];
+                    // 確保其他暫停
+                    newTracks.forEach((track, i) => {
+                        if (i !== index && track.isPlaying) {
+                            if (audioRefs.current[i]) audioRefs.current[i].pause();
+                            track.isPlaying = false;
+                        }
+                    });
+                    newTracks[index].isPlaying = true;
+                    return newTracks;
+                });
+            };
+
+            const handleAudioEnded = (index) => {
+                setAudioTracks(prev => {
+                    const newTracks = [...prev];
+                    newTracks[index].isPlaying = false;
+                    newTracks[index].progress = 0;
+                    return newTracks;
+                });
+            };
+
+            const handleTimeUpdate = (index, e) => {
+                const current = e.target.currentTime;
+                const duration = e.target.duration;
+                const percent = (duration > 0) ? (current / duration) * 100 : 0;
+                
+                setAudioTracks(prev => {
+                    const newTracks = [...prev];
+                    newTracks[index] = { ...newTracks[index], progress: percent };
+                    return newTracks;
+                });
+            };
+
+            return (
+                <div className="flex flex-col h-screen w-screen overflow-hidden text-gray-800">
+                    
+                    {/* === C區 (上方 1/3) === */}
+                    <div className="h-[33vh] w-full bg-white border-b-4 border-gray-300 flex flex-row relative shadow-lg z-10">
+                        {/* 左側 1/3: 系統時間 */}
+                        <div className="w-1/3 flex flex-col items-center justify-center border-r border-gray-200 bg-gray-50 relative group px-2">
+                            <div className="text-[1.5vw] text-gray-500 font-bold mb-1 tracking-widest">現在時間</div>
+                            <div className="text-[6vw] font-black leading-none text-gray-800 tabular-nums tracking-tighter mb-2">
+                                {formatTime(adjustedNow)}
+                            </div>
+                            
+                            {/* 微調按鈕群組 */}
+                            <div className="grid grid-cols-2 gap-x-4 gap-y-1 opacity-20 group-hover:opacity-100 transition-opacity w-full max-w-[240px]">
+                                {/* 分鐘 */}
+                                <div className="flex justify-between items-center gap-1">
+                                    <button onClick={() => adjustTime(-60)} className="btn-active flex-1 py-1 bg-gray-200 rounded text-xs hover:bg-gray-300">-1分</button>
+                                    <button onClick={() => adjustTime(60)} className="btn-active flex-1 py-1 bg-gray-200 rounded text-xs hover:bg-gray-300">+1分</button>
+                                </div>
+                                {/* 秒 */}
+                                <div className="flex justify-between items-center gap-1">
+                                    <button onClick={() => adjustTime(-1)} className="btn-active flex-1 py-1 bg-gray-200 rounded text-xs hover:bg-gray-300">-1秒</button>
+                                    <button onClick={() => adjustTime(1)} className="btn-active flex-1 py-1 bg-gray-200 rounded text-xs hover:bg-gray-300">+1秒</button>
+                                </div>
+                                {/* 半分鐘 */}
+                                <div className="col-span-2 flex justify-center gap-2 mt-1">
+                                    <button onClick={() => adjustTime(-30)} className="btn-active w-1/3 py-1 bg-gray-200 rounded text-xs hover:bg-gray-300">-30秒</button>
+                                    <button onClick={() => adjustTime(30)} className="btn-active w-1/3 py-1 bg-gray-200 rounded text-xs hover:bg-gray-300">+30秒</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* 右側 2/3: 進度條區塊 (跑道形狀) */}
+                        <div className="w-2/3 flex flex-col relative bg-gray-100 items-center justify-center p-4">
+                            {/* 學校浮水印 */}
+                            
+                            <div className="absolute inset-0 flex items-center justify-center z-10">
+                                <span className="text-[4vw] font-bold text-gray-500 opacity-60 select-none whitespace-nowrap drop-shadow-sm">
+                                    {progressInfo.text}
+                                </span>
+                            </div>
+                            
+                            {/* SVG 跑道 (Stadium Shape) */}
+                            {/* 倒數: strokeDashoffset 從 0 (滿) 變到 100 (空) */}
+                            {/* 100 - remainingPercent = elapsedPercent. 
+                                Wait, if dasharray=100.
+                                Full line = offset 0.
+                                Empty line = offset 100.
+                                We want it to shrink. So starts at 0 offset, ends at 100 offset.
+                                Offset should equal (100 - remainingPercent).
+                            */}
+                            <svg className="w-full h-full" viewBox="0 0 300 50" preserveAspectRatio="xMidYMid meet">
+                                {/* 背景軌道 (灰色) */}
+                                <rect 
+                                    x="5" y="5" width="290" height="40" rx="20" ry="20" 
+                                    fill="none" 
+                                    stroke="#e5e7eb" 
+                                    strokeWidth="8" 
+                                />
+                                {/* 進度條 (彩色) */}
+                                <rect 
+                                    x="5" y="5" width="290" height="40" rx="20" ry="20" 
+                                    fill="none" 
+                                    className={`track-transition ${progressInfo.color}`}
+                                    strokeWidth="8"
+                                    pathLength="100"
+                                    strokeDasharray="100"
+                                    strokeDashoffset={100 - progressInfo.remainingPercent}
+                                    strokeLinecap="round"
+                                />
+                            </svg>
+                        </div>
+                    </div>
+
+                    {/* === 下方區塊容器 (A + B) === */}
+                    <div className="flex-1 flex flex-row h-[67vh]">
+                        
+                        {/* === A區 (左側 1/2) === */}
+                        <div className="w-1/2 flex flex-col border-r-4 border-gray-300 bg-white overflow-hidden">
+                            
+                            {/* A區上方 2/3: 科目列表 */}
+                            <div className="h-2/3 flex flex-col border-b-2 border-dashed border-gray-300">
+                                {EXAM_SLOTS.map((slot, index) => {
+                                    const isActive = currentSlot && currentSlot.start === slot.start;
+                                    return (
+                                        <div key={index} className={`flex-1 flex items-center gap-2 border-b border-gray-100 last:border-0 px-4 transition-colors duration-300 ${isActive ? 'bg-yellow-300' : ''}`}>
+                                            
+                                            {/* 科目輸入 */}
+                                            <div className="flex-1">
+                                                <select
+                                                    value={examData.subjects[index] || ""}
+                                                    onChange={(e) => handleSubjectChange(index, e.target.value)}
+                                                    className="w-full text-[2.8vw] font-black bg-transparent border-b border-transparent hover:border-gray-200 focus:border-blue-500 outline-none placeholder-gray-300 leading-tight text-black"
+                                                >
+                                                    {["國語","數學","社會","自然","英文"].map((subj) => (
+                                                        <option key={subj} value={subj}>{subj}</option>
+                                                    ))}
+                                                </select>
+                                            </div>
+
+                                            {/* 時間顯示 */}
+                                            <div className="text-[3vw] font-black whitespace-nowrap text-black font-sans tracking-tight">
+                                                {slot.start}~{slot.end}
+                                            </div>
+
+                                            {/* 聽力控制區 */}
+                                            <div className="flex flex-col items-end justify-center gap-1 w-[22%] relative">
+                                                <input 
+                                                    type="file" 
+                                                    accept="audio/*" 
+                                                    ref={el => fileInputRefs.current[index] = el} 
+                                                    onChange={(e) => handleFileSelect(index, e)} 
+                                                    className="hidden-input"
+                                                />
+                                                
+                                                <div className="flex gap-1 w-full justify-end items-center">
+                                                    {/* 上傳按鈕 */}
+                                                    <button 
+                                                        onClick={() => fileInputRefs.current[index]?.click()}
+                                                        className="btn-active p-1 bg-gray-100 text-gray-500 rounded hover:bg-gray-200 transition-colors h-8 w-8 flex items-center justify-center"
+                                                        title="上傳聽力"
+                                                    >
+                                                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                                                    </button>
+
+                                                    {/* 播放按鈕 */}
+                                                    {audioTracks[index].src && (
+                                                        <button 
+                                                            onClick={() => togglePlay(index)}
+                                                            className={`btn-active px-2 rounded text-white text-xs font-bold shadow flex items-center justify-center transition-colors h-8 min-w-[3.5rem]
+                                                                ${audioTracks[index].isPlaying ? 'bg-red-500 hover:bg-red-600' : 'bg-green-500 hover:bg-green-600'}`}
+                                                        >
+                                                            {audioTracks[index].isPlaying ? '暫停' : '播放'}
+                                                        </button>
+                                                    )}
+
+                                                    {/* 重播按鈕 (新增) */}
+                                                    {audioTracks[index].src && (
+                                                        <button 
+                                                            onClick={() => replayAudio(index)}
+                                                            className="btn-active p-1 bg-blue-100 text-blue-600 rounded hover:bg-blue-200 transition-colors h-8 w-8 flex items-center justify-center"
+                                                            title="重播"
+                                                        >
+                                                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                                                        </button>
+                                                    )}
+                                                </div>
+
+                                                {/* 音檔進度條 */}
+                                                {audioTracks[index].src && (
+                                                    <div className="w-full h-1 bg-gray-200 rounded-full mt-1 overflow-hidden">
+                                                        <div 
+                                                            className="h-full bg-blue-500 transition-all duration-200 ease-linear"
+                                                            style={{ width: `${audioTracks[index].progress}%` }}
+                                                        ></div>
+                                                    </div>
+                                                )}
+                                                
+                                                <audio 
+                                                    ref={el => audioRefs.current[index] = el}
+                                                    src={audioTracks[index].src || undefined} 
+                                                    onEnded={() => handleAudioEnded(index)}
+                                                    onTimeUpdate={(e) => handleTimeUpdate(index, e)}
+                                                    hidden
+                                                />
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+
+                            {/* A區下方 1/3: 出席人數 */}
+                            <div className="h-1/3 flex flex-row bg-blue-50">
+                                {/* 應到 */}
+                                <div className="flex-1 flex flex-col items-center justify-center border-r border-blue-200 p-2">
+                                    <span className="text-[1.5vw] font-bold text-blue-800">應到</span>
+                                    <input 
+                                        type="number" 
+                                        value={examData.shouldArrive}
+                                        onChange={(e) => handleInputChange('shouldArrive', e.target.value)}
+                                        className="w-full text-center bg-transparent text-[4vw] font-bold text-blue-900 outline-none"
+                                        placeholder="0"
+                                    />
+                                </div>
+                                {/* 實到 */}
+                                <div className="flex-1 flex flex-col items-center justify-center border-r border-blue-200 p-2">
+                                    <span className="text-[1.5vw] font-bold text-green-800">實到</span>
+                                    <input 
+                                        type="number" 
+                                        value={examData.actualArrive}
+                                        onChange={(e) => handleInputChange('actualArrive', e.target.value)}
+                                        className="w-full text-center bg-transparent text-[4vw] font-bold text-green-900 outline-none"
+                                        placeholder="0"
+                                    />
+                                </div>
+                                {/* 未到 */}
+                                <div className="flex-[1.5] flex flex-col items-center justify-center p-2">
+                                    <span className="text-[1.5vw] font-bold text-red-800">未到座號/姓名</span>
+                                    <textarea 
+                                        value={examData.absentList}
+                                        onChange={(e) => handleInputChange('absentList', e.target.value)}
+                                        className="w-full h-full text-center bg-transparent text-[2vw] font-bold text-red-600 outline-none resize-none pt-2 leading-tight"
+                                        placeholder="點擊輸入"
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* === B區 (右側 1/2) === */}
+                        <div className="w-1/2 bg-[#fffdf0] flex flex-col relative overflow-hidden">
+                            <div className="absolute top-0 left-0 bg-yellow-400 text-yellow-900 px-4 py-2 text-xl font-bold rounded-br-lg z-20">
+                                提醒事項
+                            </div>
+                            <div className="flex-1 flex items-center justify-center p-12">
+                                {/* 字體放大至 5vw */}
+                                <div key={reminderMessage} className="text-[5vw] font-bold text-center leading-snug text-gray-800 animate-fade-in">
+                                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                                            <img
+                                                src="data:image/jpeg;base64,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"
+                                                alt="school watermark"
+                                                className="w-[38%] opacity-[0.05] select-none"
+                                                draggable="false"
+                                            />
+                                        </div>
+    
+                                        
+    
+                                    {reminderMessage}
+                                </div>
+                            </div>
+                            <div className="h-4 bg-stripes w-full"></div>
+                        </div>
+                    </div>
+                    
+                    <style>{`
+                        .bg-stripes {
+                            background-image: linear-gradient(45deg, #fbbf24 25%, transparent 25%, transparent 50%, #fbbf24 50%, #fbbf24 75%, transparent 75%, transparent);
+                            background-size: 20px 20px;
+                        }
+                        @keyframes fadeIn {
+                            from { opacity: 0; transform: translateY(10px); }
+                            to { opacity: 1; transform: translateY(0); }
+                        }
+                        .animate-fade-in {
+                            animation: fadeIn 0.5s ease-out forwards;
+                        }
+                    `}</style>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
