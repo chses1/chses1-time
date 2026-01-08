@@ -87,12 +87,15 @@
             "準備考試、收拾位置、坐在位置上"
         ];
 
-        // 格式化時間 HH:MM:SS
+        // 格式化時間 12 小時制（上午 / 下午）
         const formatTime = (date) => {
-            const h = String(date.getHours()).padStart(2, '0');
-            const m = String(date.getMinutes()).padStart(2, '0');
-            const s = String(date.getSeconds()).padStart(2, '0');
-            return `${h}:${m}:${s}`;
+            let hours = date.getHours();
+            const minutes = String(date.getMinutes()).padStart(2, '0');
+            const seconds = String(date.getSeconds()).padStart(2, '0');
+            const period = hours < 12 ? '上午' : '下午';
+            hours = hours % 12;
+            if (hours === 0) hours = 12;
+            return `${period} ${hours}:${minutes}:${seconds}`;
         };
 
         const App = () => {
@@ -126,12 +129,22 @@
                     if (!parsed.subjects) {
                         return { ...parsed, subjects: ["", "", ""] };
                     }
+                    // 預設值補齊（舊資料相容）
+                    const _shouldNum = parseInt(parsed.shouldArrive, 10);
+                    if (!Number.isFinite(_shouldNum) || _shouldNum <= 0) parsed.shouldArrive = "26";
+
+                    const _actualNum = parseInt(parsed.actualArrive, 10);
+                    if (!Number.isFinite(_actualNum) || _actualNum < 0) parsed.actualArrive = String(parsed.shouldArrive ?? "26");
+
+                    // 預設：實到跟著應到（若舊資料沒有設，或舊資料為 0）
+                    if (String(parsed.actualArrive) === "0") parsed.actualArrive = String(parsed.shouldArrive ?? "26");
+
                     return parsed;
                 }
                 return {
                     subjects: ["國語", "自然", "英文"],
-                    shouldArrive: "",
-                    actualArrive: "",
+                    shouldArrive: "26",
+                    actualArrive: "26",
                     absentList: ""
                 };
             });
@@ -259,7 +272,62 @@
 
             // --- UI 處理函式 ---
             const handleInputChange = (field, value) => {
-                setExamData(prev => ({ ...prev, [field]: value }));
+                // 允許清空；否則只保留非負整數
+                const sanitized = value === "" ? "" : String(Math.max(0, parseInt(value, 10) || 0));
+
+                setExamData(prev => {
+                    // shouldArrive 變動時：若實到原本跟著應到、或實到 > 新應到，則同步調整
+                    if (field === "shouldArrive") {
+                        const nextShould = sanitized === "" ? "" : sanitized;
+                        const wasLinked = String(prev.actualArrive) === String(prev.shouldArrive) || prev.actualArrive === "";
+                        const next = { ...prev, shouldArrive: nextShould };
+
+                        const nextShouldNum = parseInt(nextShould, 10) || 0;
+                        const prevActualNum = parseInt(prev.actualArrive, 10) || 0;
+
+                        if (wasLinked || prevActualNum > nextShouldNum) {
+                            next.actualArrive = nextShould;
+                        }
+                        return next;
+                    }
+
+                    // actualArrive 變動時：不允許超過應到
+                    if (field === "actualArrive") {
+                        const shouldNum = parseInt(prev.shouldArrive, 10) || 0;
+                        const actualNum = parseInt(sanitized, 10) || 0;
+                        const capped = sanitized === "" ? "" : String(Math.min(actualNum, shouldNum));
+                        return { ...prev, actualArrive: capped };
+                    }
+
+                    return { ...prev, [field]: sanitized };
+                });
+            };
+
+            const adjustCount = (field, delta) => {
+                setExamData(prev => {
+                    const cur = Math.max(0, parseInt(prev[field], 10) || 0);
+                    const nextVal = Math.max(0, cur + delta);
+
+                    // 調整應到：若實到原本跟著應到，或實到 > 新應到，則同步
+                    if (field === "shouldArrive") {
+                        const wasLinked = String(prev.actualArrive) === String(prev.shouldArrive) || prev.actualArrive === "";
+                        const prevActualNum = Math.max(0, parseInt(prev.actualArrive, 10) || 0);
+
+                        const next = { ...prev, shouldArrive: String(nextVal) };
+                        if (wasLinked || prevActualNum > nextVal) {
+                            next.actualArrive = String(nextVal);
+                        }
+                        return next;
+                    }
+
+                    // 調整實到：不允許超過應到
+                    if (field === "actualArrive") {
+                        const shouldNum = Math.max(0, parseInt(prev.shouldArrive, 10) || 0);
+                        return { ...prev, actualArrive: String(Math.min(nextVal, shouldNum)) };
+                    }
+
+                    return { ...prev, [field]: String(nextVal) };
+                });
             };
 
             const handleSubjectChange = (index, value) => {
@@ -440,8 +508,9 @@
                             <div className="h-2/3 flex flex-col border-b-2 border-dashed border-gray-300">
                                 {EXAM_SLOTS.map((slot, index) => {
                                     const isActive = currentSlot && currentSlot.start === slot.start;
+                                    const isNone = (examData.subjects[index] === "正常上課");
                                     return (
-                                        <div key={index} className={`flex-1 flex items-center gap-2 border-b border-gray-100 last:border-0 px-4 transition-colors duration-300 ${isActive ? 'bg-yellow-300' : ''}`}>
+                                        <div key={index} className={`flex-1 flex items-center gap-2 border-b border-gray-100 last:border-0 px-4 transition-colors duration-300 ${isActive ? 'bg-yellow-300' : ''} ${isNone ? 'opacity-40' : ''}`}>
                                             
                                             {/* 科目輸入 */}
                                             <div className="flex-1">
@@ -450,7 +519,7 @@
                                                     onChange={(e) => handleSubjectChange(index, e.target.value)}
                                                     className="w-full text-[2.8vw] font-black bg-transparent border-b border-transparent hover:border-gray-200 focus:border-blue-500 outline-none placeholder-gray-300 leading-tight text-black"
                                                 >
-                                                    {["國語","數學","社會","自然","英文"].map((subj) => (
+                                                    {["國語","數學","社會","自然","英文","正常上課"].map((subj) => (
                                                         <option key={subj} value={subj}>{subj}</option>
                                                     ))}
                                                 </select>
@@ -532,6 +601,12 @@
                                 {/* 應到 */}
                                 <div className="flex-1 flex flex-col items-center justify-center border-r border-blue-200 p-2">
                                     <span className="text-[1.5vw] font-bold text-blue-800">應到</span>
+                                    <div className="flex items-center justify-center gap-3 w-full">
+                                    <button
+                                        onClick={() => adjustCount('shouldArrive', -1)}
+                                        className="btn-active w-12 h-12 rounded-full bg-blue-200 text-blue-900 font-black text-2xl hover:bg-blue-300"
+                                        aria-label="應到減一"
+                                    >−</button>
                                     <input 
                                         type="number" 
                                         value={examData.shouldArrive}
@@ -539,10 +614,22 @@
                                         className="w-full text-center bg-transparent text-[4vw] font-bold text-blue-900 outline-none"
                                         placeholder="0"
                                     />
+                                    <button
+                                        onClick={() => adjustCount('shouldArrive', 1)}
+                                        className="btn-active w-12 h-12 rounded-full bg-blue-200 text-blue-900 font-black text-2xl hover:bg-blue-300"
+                                        aria-label="應到加一"
+                                    >+</button>
+                                </div>
                                 </div>
                                 {/* 實到 */}
                                 <div className="flex-1 flex flex-col items-center justify-center border-r border-blue-200 p-2">
                                     <span className="text-[1.5vw] font-bold text-green-800">實到</span>
+                                    <div className="flex items-center justify-center gap-3 w-full">
+                                    <button
+                                        onClick={() => adjustCount('actualArrive', -1)}
+                                        className="btn-active w-12 h-12 rounded-full bg-green-200 text-green-900 font-black text-2xl hover:bg-green-300"
+                                        aria-label="實到減一"
+                                    >−</button>
                                     <input 
                                         type="number" 
                                         value={examData.actualArrive}
@@ -550,16 +637,21 @@
                                         className="w-full text-center bg-transparent text-[4vw] font-bold text-green-900 outline-none"
                                         placeholder="0"
                                     />
+                                    <button
+                                        onClick={() => adjustCount('actualArrive', 1)}
+                                        className="btn-active w-12 h-12 rounded-full bg-green-200 text-green-900 font-black text-2xl hover:bg-green-300"
+                                        aria-label="實到加一"
+                                    >+</button>
+                                </div>
                                 </div>
                                 {/* 未到 */}
                                 <div className="flex-[1.5] flex flex-col items-center justify-center p-2">
-                                    <span className="text-[1.5vw] font-bold text-red-800">未到座號/姓名</span>
-                                    <textarea 
-                                        value={examData.absentList}
-                                        onChange={(e) => handleInputChange('absentList', e.target.value)}
-                                        className="w-full h-full text-center bg-transparent text-[2vw] font-bold text-red-600 outline-none resize-none pt-2 leading-tight"
-                                        placeholder="點擊輸入"
-                                    />
+                                    <span className="text-[1.5vw] font-bold text-red-800">未到</span>
+                                    <div className="w-full h-full flex items-center justify-center">
+                                        <div className="text-[4vw] font-bold text-red-600">
+                                            {Math.max(0, (parseInt(examData.shouldArrive, 10) || 0) - (parseInt(examData.actualArrive, 10) || 0))}
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
